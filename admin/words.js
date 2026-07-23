@@ -1,3 +1,4 @@
+/* eslint-disable */
 /*global systemDictionary:true */
 'use strict';
 
@@ -13,6 +14,18 @@ const dictionary = {
 		'es': 'Ajustes del adaptador para linuxcontrol',
 		'pl': 'Ustawienia adaptera dla linuxcontrol',
 		'zh-cn': 'linuxcontrol'
+	},
+	'legacy SSH': {
+		'en': 'legacy SSH (allow old ciphers)',
+		'de': 'Veraltete SSH-Algorithmen erlauben',
+		'ru': 'устаревшие алгоритмы SSH',
+		'pt': 'algoritmos SSH legados',
+		'nl': 'verouderde SSH-algoritmen',
+		'fr': 'algorithmes SSH obsolètes',
+		'it': 'algoritmi SSH obsoleti',
+		'es': 'algoritmos SSH obsoletos',
+		'pl': 'starsze algorytmy SSH',
+		'zh-cn': '允许旧版 SSH 算法'
 	},
 	"Controlling Linux devices and get information about your system": {
 		"en": "Controlling Linux devices and get information about your system",

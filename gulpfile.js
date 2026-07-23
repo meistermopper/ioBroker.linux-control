@@ -1,3 +1,4 @@
-"use strict";
+// @ts-nocheck
+'use strict';
 
-module.exports = require("@iobroker/adapter-dev/gulp")();
+module.exports = require('@iobroker/adapter-dev/gulp')();
