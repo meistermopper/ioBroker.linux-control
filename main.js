@@ -13,12 +13,9 @@ const NodeSSH = require('node-ssh').NodeSSH;
 const csvToJson = require('csvtojson');
 const words = require('./admin/words.js');
 const ping = require('ping');
-const { exception } = require('node:console');
 
 let language = 'en';
 let _ = null;
-var requestInterval;
-var requestIntervalUserCommand;
 
 this.isAdapterStart = false;
 
@@ -32,6 +29,8 @@ class LinuxControl extends utils.Adapter {
 			...options,
 			name: 'linux-control',
 		});
+		this.hostTimeouts = new Map();
+		this.userCommandTimeouts = new Map();
 		this.on('ready', this.onReady.bind(this));
 		this.on('objectChange', this.onObjectChange.bind(this));
 		this.on('stateChange', this.onStateChange.bind(this));
@@ -44,9 +43,13 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async onReady() {
 		try {
+			this.config.hosts = Array.isArray(this.config.hosts) ? this.config.hosts : [];
+			this.config.blacklistDatapoints = this.config.blacklistDatapoints || {};
+			this.config.serviceWhiteList = this.config.serviceWhiteList || {};
+
 			// Initialize your adapter here
 			await this.prepareTranslation();
-			await this.setSelectableHosts()
+			await this.setSelectableHosts();
 
 			this.isAdapterStart = true;
 
@@ -63,13 +66,19 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async refreshHost(host) {
-		if (host.enabled) {
+		if (host?.enabled) {
+			if (!this.config.blacklistDatapoints[host.name]) {
+				this.config.blacklistDatapoints[host.name] = [];
+			}
+			if (!this.config.serviceWhiteList[host.name]) {
+				this.config.serviceWhiteList[host.name] = [];
+			}
 			this.log.info(`getting data from ${host.name} (${host.ip}:${host.port}${this.isAdapterStart ? ', Adapter start' : ''})`);
 
 			await this.createObjectButton(`${host.name}.refresh`, _('refreshHost'));
 			this.subscribeStates(`${host.name}.refresh`);
 
-			let connection = await this.getConnection(host);
+			const connection = await this.getConnection(host);
 
 			await this.getInfos(connection, host);
 
@@ -87,18 +96,18 @@ class LinuxControl extends utils.Adapter {
 				connection.dispose();
 
 				if (await this.getObjectAsync(`${host.name}.info.lastRefresh`)) {
-					await this.setStateAsync(`${host.name}.info.lastRefresh`, new Date().getTime(), true);
+					await this.setStateAsync(`${host.name}.info.lastRefresh`, Date.now(), true);
 				}
 
 				this.log.info(`successful received data from ${host.name} (${host.ip}:${host.port})`);
 			}
 
 			if (this.isAdapterStart) {
-				let objList = await this.getForeignObjectsAsync(`${this.namespace}.${host.name}.*`);
+				const objList = await this.getForeignObjectsAsync(`${this.namespace}.${host.name}.*`);
 				for (const id in objList) {
-					let obj = objList[id];
+					const obj = objList[id];
 
-					if (obj && obj.common && obj.common.role === 'button' && obj.common.type === 'boolean') {
+					if (obj?.common?.role === 'button' && obj.common.type === 'boolean') {
 						this.subscribeStates(id);
 						this.debugHandling(`[refreshHost] ${host.name} (${host.ip}:${host.port}): button '${id}' subscribed`);
 					}
@@ -106,12 +115,16 @@ class LinuxControl extends utils.Adapter {
 			}
 
 			// interval using timeout
-			if (requestInterval) requestInterval = null;
+			if (this.hostTimeouts.has(host.name)) {
+				this.clearTimeout(this.hostTimeouts.get(host.name));
+				this.hostTimeouts.delete(host.name);
+			}
 
 			if (host.interval && host.interval > 0) {
-				requestInterval = setTimeout(() => {
+				const timer = this.setTimeout(() => {
 					this.refreshHost(host);
 				}, host.interval * 60000);
+				this.hostTimeouts.set(host.name, timer);
 			} else {
 				this.log.info(`polling interval is deactivated for ${host.name} (${host.ip}:${host.port})`);
 			}
@@ -125,17 +138,17 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async getInfos(connection, host) {
-		let logPrefix = `[getInfos] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[getInfos] ${host.name} (${host.ip}:${host.port}):`;
 
 		const objects = require('./admin/lib/info.json');
 
-		if (this.config.whitelist && this.config.whitelist["info"] && this.config.whitelist["info"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('info.all')) {
+		if (this.config.whitelist?.info?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('info.all')) {
 
 			for (const propObj of objects) {
-				if (this.config.whitelist["info"].includes(propObj.id) && !this.config.blacklistDatapoints[host.name].includes(`info.${propObj.id}`)) {
-					let id = `${host.name.replace(' ', '_')}.info.${propObj.id}`;
+				if (this.config.whitelist.info.includes(propObj.id) && !this.config.blacklistDatapoints[host.name].includes(`info.${propObj.id}`)) {
+					const id = `${host.name.replace(' ', '_')}.info.${propObj.id}`;
 
-					if (propObj.id === "is_online") {
+					if (propObj.id === 'is_online') {
 						if (connection) {
 							await this.createObjectBoolean(id, propObj.name);
 							await this.setStateAsync(id, true, true);
@@ -144,7 +157,7 @@ class LinuxControl extends utils.Adapter {
 							await this.setStateAsync(id, false, true);
 						}
 
-					} else if (propObj.id === "ip") {
+					} else if (propObj.id === 'ip') {
 						await this.createObjectString(id, propObj.name);
 						await this.setStateAsync(id, host.ip, true);
 
@@ -176,14 +189,14 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async userCommand(connection, host) {
-		let logPrefix = `[userCommand] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[userCommand] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
 			/** @type {any[]} */
-			let commandsList = this.config.commands;
+			const commandsList = this.config.commands;
 
 			if (commandsList.length > 0) {
-				let commands = commandsList.filter(x => {
+				const commands = commandsList.filter(x => {
 					return x.host === host.name;
 				});
 
@@ -230,7 +243,7 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} cmd
 	 */
 	async userCommandExecute(connection, host, cmd) {
-		let logPrefix = `[userCommandExecute] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[userCommandExecute] ${host.name} (${host.ip}:${host.port}):`;
 
 		let establishedNewConnection = false;
 
@@ -243,10 +256,10 @@ class LinuxControl extends utils.Adapter {
 			}
 
 			if (connection) {
-				let id = `${host.name.replace(' ', '_')}.${cmd.name}`;
+				const id = `${host.name.replace(' ', '_')}.${cmd.name}`;
 
 				if (cmd.type !== 'button') {
-					let response = await this.sendCommand(connection, host, `${cmd.command}`, `[userCommandExecute] ${host.name} (${host.ip}:${host.port}, id: ${cmd.name}, description: ${cmd.description}):`);
+					const response = await this.sendCommand(connection, host, `${cmd.command}`, `[userCommandExecute] ${host.name} (${host.ip}:${host.port}, id: ${cmd.name}, description: ${cmd.description}):`);
 
 					if (response) {
 						if (cmd.type === 'string') {
@@ -257,7 +270,7 @@ class LinuxControl extends utils.Adapter {
 							await this.setStateAsync(id, parseFloat(response), true);
 						} else if (cmd.type === 'boolean') {
 							await this.createObjectBoolean(id, cmd.description);
-							await this.setStateAsync(id, (response === 'true' || parseInt(response) === 1) ? true : false, true);
+							await this.setStateAsync(id, response === 'true' || parseInt(response, 10) === 1, true);
 						} else if (cmd.type === 'array') {
 							await this.createObjectArray(id, cmd.description);
 							await this.setStateAsync(id, JSON.parse(response), true);
@@ -265,7 +278,7 @@ class LinuxControl extends utils.Adapter {
 					} else {
 						if (await this.getObjectAsync(id)) {
 							if (cmd.type === 'string') {
-								await this.setStateAsync(id, "", true);
+								await this.setStateAsync(id, '', true);
 							} else if (cmd.type === 'number') {
 								await this.setStateAsync(id, 0, true);
 							} else if (cmd.type === 'boolean') {
@@ -276,7 +289,7 @@ class LinuxControl extends utils.Adapter {
 						} else {
 							if (cmd.type === 'string') {
 								await this.createObjectString(id, cmd.description);
-								await this.setStateAsync(id, "", true);
+								await this.setStateAsync(id, '', true);
 							} else if (cmd.type === 'number') {
 								await this.createObjectNumber(id, cmd.description, cmd.unit);
 								await this.setStateAsync(id, 0, true);
@@ -302,13 +315,16 @@ class LinuxControl extends utils.Adapter {
 
 			if (cmd.interval && cmd.interval > 0 && cmd.type !== 'button') {
 				// interval using timeout
-				if (requestIntervalUserCommand) requestIntervalUserCommand = null;
-
-				if (cmd.interval && cmd.interval > 0) {
-					requestIntervalUserCommand = setTimeout(() => {
-						this.userCommandExecute(undefined, host, cmd);
-					}, cmd.interval * 1000);
+				const timerKey = `${host.name}_${cmd.name}`;
+				if (this.userCommandTimeouts.has(timerKey)) {
+					this.clearTimeout(this.userCommandTimeouts.get(timerKey));
+					this.userCommandTimeouts.delete(timerKey);
 				}
+
+				const timer = this.setTimeout(() => {
+					this.userCommandExecute(undefined, host, cmd);
+				}, cmd.interval * 1000);
+				this.userCommandTimeouts.set(timerKey, timer);
 			}
 		} catch (err) {
 			this.log.error(`${logPrefix} datapoint-id: ${cmd.name}, description: ${cmd.description}`);
@@ -323,29 +339,29 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async folderSizes(connection, host) {
-		let logPrefix = `[folderSizes] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[folderSizes] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
 			if (connection) {
 				// @ts-ignore
-				let folderList = this.config.folders;
+				const folderList = this.config.folders;
 
 				if (folderList.length > 0) {
-					let hostFolders = folderList.filter(x => {
+					const hostFolders = folderList.filter(x => {
 						return x.host === host.name;
-					})
+					});
 
 					for (const folder of hostFolders) {
 						if (folder.enabled) {
-							let unitFaktor = "/1024"
+							let unitFaktor = '/1024';
 
 							if (folder.unit === 'GB') {
-								unitFaktor = "/1024/1024"
+								unitFaktor = '/1024/1024';
 							} else if (folder.unit === 'TB') {
-								unitFaktor = "/1024/1024/1024"
+								unitFaktor = '/1024/1024/1024';
 							}
 
-							let response = undefined;
+							let response;
 							if (folder.fileNamePattern) {
 								response = await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}find ${folder.path} -name "${folder.fileNamePattern}" -exec du -c {} + | tail -1 | awk '{printf $1${unitFaktor}}'`, logPrefix, undefined, false);
 							} else {
@@ -353,23 +369,35 @@ class LinuxControl extends utils.Adapter {
 							}
 
 							if (response) {
-								let id = `${host.name.replace(' ', '_')}.folders.${folder.name}.size`;
-								await this.createObjectNumber(id, _('folderSize'), folder.unit);
+								const id = `${host.name.replace(' ', '_')}.folders.${folder.name}.size`;
 
-								let result = parseFloat(response).toFixed(parseInt(folder.digits) || 0);
+								// @ts-ignore
+								if (this.config.whitelist.folders.includes('size') && !this.config.blacklistDatapoints[host.name].includes(`folders.${folder.name}.size`)) {
+									await this.createObjectNumber(id, _('folderSize'), folder.unit);
 
-								this.debugHandling(`${logPrefix} ${id}: ${parseFloat(result)} ${folder.unit}`);
-								await this.setStateAsync(id, parseFloat(result), true);
+									const result = parseFloat(response).toFixed(parseInt(folder.digits, 10) || 0);
+
+									this.debugHandling(`${logPrefix} ${id}: ${parseFloat(result)} ${folder.unit}`);
+									await this.setStateAsync(id, parseFloat(result), true);
+								} else {
+									await this.delMyObject(id, logPrefix);
+								}
 
 								if (folder.countFiles) {
 									response = await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}find ${folder.path} -name "${folder.fileNamePattern ? folder.fileNamePattern : '*'}" | wc -l`, logPrefix, undefined, false);
 
 									if (response) {
-										let id = `${host.name.replace(' ', '_')}.folders.${folder.name}.files`;
-										await this.createObjectNumber(id, _('countFilesInFolder'), _('files'));
+										const id = `${host.name.replace(' ', '_')}.folders.${folder.name}.files`;
 
-										this.debugHandling(`${logPrefix} ${id}: ${parseInt(response)} ${_('files')}`);
-										await this.setStateAsync(id, parseInt(response), true);
+										// @ts-ignore
+										if (this.config.whitelist.folders.includes('countFiles') && !this.config.blacklistDatapoints[host.name].includes(`folders.${folder.name}.countFiles`)) {
+											await this.createObjectNumber(id, _('countFilesInFolder'), _('files'));
+
+											this.debugHandling(`${logPrefix} ${id}: ${parseInt(response, 10)} ${_('files')}`);
+											await this.setStateAsync(id, parseInt(response, 10), true);
+										} else {
+											await this.delMyObject(id, logPrefix);
+										}
 									}
 								}
 
@@ -377,18 +405,22 @@ class LinuxControl extends utils.Adapter {
 									response = await this.sendCommand(connection, host, `tmp=$(${host.useSudo ? 'sudo -S ' : ''}find ${folder.path} -name "${folder.fileNamePattern ? folder.fileNamePattern : '*'}" -type f -exec stat -c "%Y %n" -- {} \\; | sort -nr | head -n1 | awk '{print $2}') && date +%s -r $tmp`, logPrefix, undefined, false);
 
 									if (response) {
-										let id = `${host.name.replace(' ', '_')}.folders.${folder.name}.lastChange`;
+										const id = `${host.name.replace(' ', '_')}.folders.${folder.name}.lastChange`;
 
-										let timestamp = parseInt(response) * 1000;
+										// @ts-ignore
+										if (this.config.whitelist.folders.includes('lastChange') && !this.config.blacklistDatapoints[host.name].includes(`folders.${folder.name}.lastChange`)) {
+											const timestamp = parseInt(response, 10) * 1000;
 
-										await this.createObjectNumber(id, _('last change'));
+											await this.createObjectNumber(id, _('last change'));
 
-										this.debugHandling(`${logPrefix} ${id}: ${timestamp} -> ${this.formatDate(timestamp, 'DD.MM.YYYY hh:mm')}`);
-										await this.setStateAsync(id, timestamp, true);
+											this.debugHandling(`${logPrefix} ${id}: ${timestamp} -> ${this.formatDate(timestamp, 'DD.MM.YYYY hh:mm')}`);
+											await this.setStateAsync(id, timestamp, true);
+										} else {
+											await this.delMyObject(id, logPrefix);
+										}
 									}
 								}
 							}
-
 						} else {
 							this.debugHandling(`${logPrefix} getting size for '${host.name.replace(' ', '_')}.folders.${folder.name}' -> is not enabled!`);
 						}
@@ -406,47 +438,47 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async needrestart(connection, host) {
-		let logPrefix = `[needrestart] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[needrestart] ${host.name} (${host.ip}:${host.port}):`;
 
 		const objects = require('./admin/lib/needrestart.json');
 
 		try {
 			// @ts-ignore
-			if (this.config.whitelist && this.config.whitelist["needrestart"] && this.config.whitelist["needrestart"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('needrestart.all')) {
+			if (this.config.whitelist?.needrestart?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('needrestart.all')) {
 				if (connection) {
 
 					if (await this.cmdPackageExist(connection, host, 'needrestart')) {
-						let response = await this.sendCommand(connection, host, `(tmp=$(${host.useSudo ? 'sudo -S ' : ''}/usr/sbin/needrestart -p -l | head -1) && echo "$tmp" | awk '{print $1}' && echo ", $tmp" | sed 's/.*Services=\\([0-9]*\\);.*/\\1/' && echo "$tmp" | sed 's/.*Containers=\\([0-9]*\\);.*/\\1/' && echo "$tmp" | sed 's/.*Sessions=\\([0-9]*\\);.*/\\1/') | awk '{printf "%s" (NR%4==0?RS:FS),$1}'`, logPrefix, undefined, false);
+						const response = await this.sendCommand(connection, host, `(tmp=$(${host.useSudo ? 'sudo -S ' : ''}/usr/sbin/needrestart -p -l | head -1) && echo "$tmp" | awk '{print $1}' && echo ", $tmp" | sed 's/.*Services=\\([0-9]*\\);.*/\\1/' && echo "$tmp" | sed 's/.*Containers=\\([0-9]*\\);.*/\\1/' && echo "$tmp" | sed 's/.*Sessions=\\([0-9]*\\);.*/\\1/') | awk '{printf "%s" (NR%4==0?RS:FS),$1}'`, logPrefix, undefined, false);
 
 						if (response) {
 
 							/** @type {object} */
-							let parsed = await csvToJson({
+							const parsed = await csvToJson({
 								noheader: true,
 								headers: ['needrestart', 'services', 'containers', 'sessions'],
-								delimiter: [" "]
+								delimiter: [' ']
 							}).fromString(response);
 
 							this.debugHandling(`${logPrefix} csvToJson result: ${JSON.stringify(parsed)}`);
 
 							for (const obj of objects) {
 								// @ts-ignore
-								if (this.config.whitelist["needrestart"].includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`needrestart.${obj.id}`)) {
-									if (parsed && parsed[0] && parsed[0][obj.id]) {
-										let id = `${host.name.replace(' ', '_')}.needrestart.${obj.id}`;
+								if (this.config.whitelist.needrestart.includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`needrestart.${obj.id}`)) {
+									if (parsed?.[0]?.[obj.id]) {
+										const id = `${host.name.replace(' ', '_')}.needrestart.${obj.id}`;
 
 										if (obj.id === 'needrestart') {
-											this.debugHandling(`${logPrefix} ${id}: ${parsed[0][obj.id] === 'OK' ? false : true}`);
+											this.debugHandling(`${logPrefix} ${id}: ${parsed[0][obj.id] !== 'OK'}`);
 
 											await this.createObjectBoolean(id, _(obj.name));
-											await this.setStateAsync(id, parsed[0][obj.id] === 'OK' ? false : true, true);
+											await this.setStateAsync(id, parsed[0][obj.id] !== 'OK', true);
 										}
 
 										if (obj.type === 'number') {
-											this.debugHandling(`${logPrefix} ${id}: ${parseInt(parsed[0][obj.id])}`);
+											this.debugHandling(`${logPrefix} ${id}: ${parseInt(parsed[0][obj.id], 10)}`);
 
 											await this.createObjectNumber(id, _(obj.name));
-											await this.setStateAsync(id, parseInt(parsed[0][obj.id]), true);
+											await this.setStateAsync(id, parseInt(parsed[0][obj.id], 10), true);
 										}
 									}
 								} else {
@@ -458,7 +490,7 @@ class LinuxControl extends utils.Adapter {
 					} else {
 						this.log.warn(`${logPrefix} package 'needrestart' not installed. You must install 'needrestart' to use this functions or deactivate the datapoints!`);
 
-						let needRestartStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.needrestart.*`);
+						const needRestartStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.needrestart.*`);
 						for (const id of Object.keys(needRestartStates)) {
 							await this.delMyObject(id);
 						}
@@ -468,7 +500,7 @@ class LinuxControl extends utils.Adapter {
 				if (this.isAdapterStart) {
 					this.debugHandling(`${logPrefix} no datapoints selected -> removing existing datapoints`);
 
-					let needRestartStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.needrestart.*`);
+					const needRestartStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.needrestart.*`);
 					for (const id of Object.keys(needRestartStates)) {
 						await this.delMyObject(id);
 					}
@@ -486,43 +518,43 @@ class LinuxControl extends utils.Adapter {
 	 * @param {string | undefined} serviceName
 	 */
 	async servicesInfo(connection, host, serviceName = undefined) {
-		let logPrefix = `[servicesInfo] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[servicesInfo] ${host.name} (${host.ip}:${host.port}):`;
 
 		const objects = require('./admin/lib/services.json');
 
 		try {
 			// @ts-ignore
-			if (this.config.whitelist && this.config.whitelist["services"] && this.config.whitelist["services"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('services.all')) {
+			if (this.config.whitelist?.services?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('services.all')) {
 				if (connection) {
 					let response = await this.sendCommand(connection, host, `systemctl list-units --type service --all --no-legend | awk '{out=""; for(i=5;i<=NF;i++){out=out" "$i}; print $1","$2","$3","$4","out}'${serviceName ? ` | grep ${serviceName}` : ''}`, logPrefix, undefined, false);
 
 					if (response) {
-						response = response.replace(/\t/g, ',')
+						response = response.replace(/\t/g, ',');
 
 						/** @type {object} */
-						let parsed = await csvToJson({
+						const parsed = await csvToJson({
 							noheader: true,
 							headers: ['id', 'load', 'active', 'running', 'description'],
-							delimiter: [","]
+							delimiter: [',']
 						}).fromString(response);
 
 						this.debugHandling(`${logPrefix} csvToJson result: ${JSON.stringify(parsed)}`);
 
 						// TODO: whitelist für services implementieren
 						for (const result of parsed) {
-							let idPrefix = `${host.name.replace(' ', '_')}.services.${result.id.replace('.service', '')}`;
+							const idPrefix = `${host.name.replace(' ', '_')}.services.${result.id.replace('.service', '')}`;
 
 							for (const obj of objects) {
-								let id = `${idPrefix}.${obj.id}`;
+								const id = `${idPrefix}.${obj.id}`;
 
 								// @ts-ignore
-								if (this.config.whitelist["services"].includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`services.${obj.id}`) && (this.config.serviceWhiteList[host.name].includes(result.id.replace('.service', '')) || this.config.serviceWhiteList[host.name].length === 0)) {
+								if (this.config.whitelist.services.includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`services.${obj.id}`) && (this.config.serviceWhiteList[host.name].includes(result.id.replace('.service', '')) || this.config.serviceWhiteList[host.name].length === 0)) {
 									if (obj.type === 'string') {
 										await this.createObjectString(id, obj.name);
 										await this.setStateAsync(id, result[obj.id], true);
 									} else if (obj.type === 'boolean') {
 										await this.createObjectBoolean(id, obj.name);
-										await this.setStateAsync(id, result[obj.id] === 'running' ? true : false, true);
+										await this.setStateAsync(id, result[obj.id] === 'running', true);
 									} else if (obj.type === 'button') {
 										await this.createObjectButton(id, obj.name);
 										this.subscribeStates(id);
@@ -538,7 +570,7 @@ class LinuxControl extends utils.Adapter {
 				if (this.isAdapterStart) {
 					this.debugHandling(`${logPrefix} no datapoints selected -> removing existing datapoints`);
 
-					let servicesStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.services.*`);
+					const servicesStates = await this.getStatesAsync(`${this.namespace}.${host.name.replace(' ', '_')}.services.*`);
 					for (const id of Object.keys(servicesStates)) {
 						await this.delMyObject(id);
 					}
@@ -554,34 +586,34 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async distributionInfo(connection, host) {
-		let logPrefix = `[distributionInfo] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[distributionInfo] ${host.name} (${host.ip}:${host.port}):`;
 
 		const objects = require('./admin/lib/distribution.json');
 
 		try {
 			// @ts-ignore
-			if (this.config.whitelist && this.config.whitelist["distribution"] && this.config.whitelist["distribution"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('distribution.all')) {
+			if (this.config.whitelist?.distribution?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('distribution.all')) {
 				if (connection) {
-					let response = await this.sendCommand(connection, host, "cat /etc/os-release", logPrefix, undefined, false);
+					const response = await this.sendCommand(connection, host, 'cat /etc/os-release', logPrefix, undefined, false);
 
 					if (response) {
 
 						/** @type {object} */
-						let parsed = await csvToJson({
+						const parsed = await csvToJson({
 							noheader: true,
 							headers: ['prop', 'val'],
-							delimiter: ["="]
+							delimiter: ['=']
 						}).fromString(response);
 
 						this.debugHandling(`${logPrefix} csvToJson result: ${JSON.stringify(parsed)}`);
 
 						for (const propObj of objects) {
-							let obj = parsed.find(x => x.prop === propObj.propName);
+							const obj = parsed.find(x => x.prop === propObj.propName);
 
 							// @ts-ignore
-							if (this.config.whitelist["distribution"].includes(propObj.id) && !this.config.blacklistDatapoints[host.name].includes(`distribution.${propObj.id}`)) {
-								if (obj && obj.prop && obj.val) {
-									let id = `${host.name.replace(' ', '_')}.distribution.${propObj.id}`;
+							if (this.config.whitelist.distribution.includes(propObj.id) && !this.config.blacklistDatapoints[host.name].includes(`distribution.${propObj.id}`)) {
+								if (obj?.prop && obj.val) {
+									const id = `${host.name.replace(' ', '_')}.distribution.${propObj.id}`;
 
 									await this.createObjectString(id, propObj.name);
 									await this.setStateAsync(id, obj.val, true);
@@ -615,7 +647,7 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async updateInfos(connection, host) {
-		let logPrefix = `[updateInfos] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[updateInfos] ${host.name} (${host.ip}:${host.port}):`;
 		try {
 			if (connection) {
 				if (this.isAdapterStart) {
@@ -628,10 +660,10 @@ class LinuxControl extends utils.Adapter {
 					} else {
 						// user defined a diffrent update interval for apt update
 
-						let lastUpdate = await this.getStateAsync(`${this.namespace}.${host.name}.updates.upgradable`);
+						const lastUpdate = await this.getStateAsync(`${this.namespace}.${host.name}.updates.upgradable`);
 						if (lastUpdate) {
-							let now = new Date().getTime();
-							let diff = (now - lastUpdate.ts) / 1000 / 60;
+							const now = Date.now();
+							const diff = (now - lastUpdate.ts) / 1000 / 60;
 							if (diff > this.config.aptUpdateInterval) {
 								await this.cmdAptUpdate(connection, host);
 							} else {
@@ -654,14 +686,14 @@ class LinuxControl extends utils.Adapter {
 	 * @param {string | undefined} responseId
 	 */
 	async cmdShutdown(connection, host, restart = false, responseId = undefined) {
-		let logPrefix = `[cmdShutdown] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[cmdShutdown] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
 			if (connection) {
 
-				let cmd = `${host.useSudo ? 'sudo -S ' : ''}shutdown 0`
+				let cmd = `${host.useSudo ? 'sudo -S ' : ''}shutdown 0`;
 				if (restart) {
-					cmd = `${host.useSudo ? 'sudo -S ' : ''}shutdown -r 0`
+					cmd = `${host.useSudo ? 'sudo -S ' : ''}shutdown -r 0`;
 				}
 
 				await this.sendCommand(connection, host, cmd, logPrefix, responseId);
@@ -677,11 +709,11 @@ class LinuxControl extends utils.Adapter {
 	 * @param {string} responseId
 	 */
 	async cmdAptUpgrade(connection, host, responseId) {
-		let logPrefix = `[cmdAptUpgrade] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[cmdAptUpgrade] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
 			if (connection) {
-				let response = await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}DEBIAN_FRONTEND=noninteractive apt-get upgrade -y`, logPrefix, responseId);
+				const response = await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}DEBIAN_FRONTEND=noninteractive apt-get upgrade -y`, logPrefix, responseId);
 
 				if (response) {
 					await this.setStateAsync(responseId, response, true);
@@ -701,11 +733,11 @@ class LinuxControl extends utils.Adapter {
 	 * @returns {Promise<boolean>}
 	 */
 	async cmdPackageExist(connection, host, packageName) {
-		let logPrefix = `[cmdPackageExist] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[cmdPackageExist] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
 			if (connection) {
-				let response = await this.sendCommand(connection, host, `dpkg-query --list | grep -i ${packageName}`, logPrefix);
+				const response = await this.sendCommand(connection, host, `dpkg-query --list | grep -i ${packageName}`, logPrefix);
 
 				if (response) {
 					return true;
@@ -727,19 +759,19 @@ class LinuxControl extends utils.Adapter {
 	 * @param {string | undefined} responseId
 	 */
 	async cmdAptUpdate(connection, host, responseId = undefined) {
-		let logPrefix = `[cmdAptUpdate] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[cmdAptUpdate] ${host.name} (${host.ip}:${host.port}):`;
 
 		const objects = require('./admin/lib/updates.json');
 
 		try {
 			// @ts-ignore
-			if (this.config.whitelist && this.config.whitelist["updates"] && this.config.whitelist["updates"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('updates.all')) {
+			if (this.config.whitelist?.updates?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('updates.all')) {
 				if (connection) {
 					// run apt update
 					let response = await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}apt-get update`, logPrefix, responseId, false);
 
 					if (response) {
-						response = await this.sendCommand(connection, host, `apt-get --just-print upgrade 2>&1 | perl -ne 'if (/Inst\\s([\\w,\\-,\\d,\\.,~,:,\\+]+)\\s\\[([\\w,\\-,\\d,\\.,~,:,\\+]+)\\]\\s\\(([\\w,\\-,\\d,\\.,~,:,\\+]+)\\)? /i) {print \"$1,$2,$3\\n\"}' \| column -s \" \" -t`, logPrefix, undefined, false);
+						response = await this.sendCommand(connection, host, `apt-get --just-print upgrade 2>&1 | perl -ne 'if (/Inst\\s([\\w,\\-,\\d,\\.,~,:,\\+]+)\\s\\[([\\w,\\-,\\d,\\.,~,:,\\+]+)\\]\\s\\(([\\w,\\-,\\d,\\.,~,:,\\+]+)\\)? /i) {print "$1,$2,$3\\n"}' | column -s " " -t`, logPrefix, undefined, false);
 
 						let parsed = [];
 						let newPackages = 0;
@@ -748,7 +780,7 @@ class LinuxControl extends utils.Adapter {
 							parsed = await csvToJson({
 								noheader: true,
 								headers: ['name', 'installedVersion', 'availableVersion'],
-								delimiter: [","]
+								delimiter: [',']
 								// @ts-ignore
 							}).fromString(response);
 
@@ -758,10 +790,10 @@ class LinuxControl extends utils.Adapter {
 						// Number of new Packages
 						let id = `${host.name.replace(' ', '_')}.updates.newPackages`;
 						// @ts-ignore
-						if (this.config.whitelist["updates"].includes("newPackages") && !this.config.blacklistDatapoints[host.name].includes(`updates.newPackages`)) {
+						if (this.config.whitelist.updates.includes('newPackages') && !this.config.blacklistDatapoints[host.name].includes(`updates.newPackages`)) {
 							this.debugHandling(`${logPrefix} ${id}: ${newPackages}`);
 
-							await this.createObjectNumber(id, `newPackages`, `packages`);
+							await this.createObjectNumber(id, 'newPackages', 'packages');
 							await this.setStateAsync(id, newPackages, true);
 						} else {
 							await this.delMyObject(id, logPrefix);
@@ -770,11 +802,11 @@ class LinuxControl extends utils.Adapter {
 						// is upgradable
 						id = `${host.name.replace(' ', '_')}.updates.upgradable`;
 						// @ts-ignore
-						if (this.config.whitelist["updates"].includes("upgradable") && !this.config.blacklistDatapoints[host.name].includes(`updates.upgradable`)) {
-							this.debugHandling(`${logPrefix} ${id}: ${newPackages > 0 ? true : false}`);
+						if (this.config.whitelist.updates.includes('upgradable') && !this.config.blacklistDatapoints[host.name].includes(`updates.upgradable`)) {
+							this.debugHandling(`${logPrefix} ${id}: ${newPackages > 0}`);
 
-							await this.createObjectBoolean(id, `upgradable`);
-							await this.setStateAsync(id, newPackages > 0 ? true : false, true);
+							await this.createObjectBoolean(id, 'upgradable');
+							await this.setStateAsync(id, newPackages > 0, true);
 						} else {
 							await this.delMyObject(id, logPrefix);
 						}
@@ -782,15 +814,15 @@ class LinuxControl extends utils.Adapter {
 						// list of new packages
 						id = `${host.name.replace(' ', '_')}.updates.newPackagesList`;
 						// @ts-ignore
-						if (this.config.whitelist["updates"].includes("newPackagesList") && !this.config.blacklistDatapoints[host.name].includes(`updates.newPackagesList`)) {
+						if (this.config.whitelist.updates.includes('newPackagesList') && !this.config.blacklistDatapoints[host.name].includes(`updates.newPackagesList`)) {
 
 							if (newPackages > 0) {
 								this.debugHandling(`${logPrefix} ${id}: ${JSON.stringify(parsed)}`);
 
-								await this.createObjectString(id, `newPackagesList`);
+								await this.createObjectString(id, 'newPackagesList');
 								await this.setStateAsync(id, JSON.stringify(parsed), true);
 							} else {
-								await this.createObjectString(id, `newPackagesList`);
+								await this.createObjectString(id, 'newPackagesList');
 								await this.setStateAsync(id, '', true);
 							}
 						} else {
@@ -799,26 +831,26 @@ class LinuxControl extends utils.Adapter {
 					}
 
 					// last update
-					let id = `${host.name.replace(' ', '_')}.updates.lastUpdate`;
+					const id = `${host.name.replace(' ', '_')}.updates.lastUpdate`;
 					// @ts-ignore
-					if (this.config.whitelist["updates"].includes("lastUpdate") && !this.config.blacklistDatapoints[host.name].includes(`updates.lastUpdate`)) {
-						response = await this.sendCommand(connection, host, "dpkg-query -f '${db-fsys:Last-Modified}\n' -W | sort -nr | head -1", logPrefix, responseId, false);
+					if (this.config.whitelist.updates.includes('lastUpdate') && !this.config.blacklistDatapoints[host.name].includes(`updates.lastUpdate`)) {
+						response = await this.sendCommand(connection, host, "dpkg-query -f '$" + "{db-fsys:Last-Modified}\n' -W | sort -nr | head -1", logPrefix, responseId, false);
 						if (response) {
-							let timestamp = parseInt(response) * 1000;
+							const timestamp = parseInt(response, 10) * 1000;
 
 							this.debugHandling(`${logPrefix} ${id}: ${timestamp} -> ${this.formatDate(timestamp, 'DD.MM.YYYY hh:mm')}`);
 
-							await this.createObjectNumber(id, `lastUpdate`);
+							await this.createObjectNumber(id, 'lastUpdate');
 							await this.setStateAsync(id, timestamp, true);
 						} else {
 							// Fallback method
-							response = await this.sendCommand(connection, host, "grep installed /var/log/dpkg.log | tail -1 | cut -c1-19", logPrefix, responseId, false);
+							response = await this.sendCommand(connection, host, 'grep installed /var/log/dpkg.log | tail -1 | cut -c1-19', logPrefix, responseId, false);
 							if (response) {
-								let timestamp = Date.parse(response);
+								const timestamp = Date.parse(response);
 
 								this.debugHandling(`${logPrefix} ${id}: Fallback method: ${timestamp} -> ${this.formatDate(timestamp, 'DD.MM.YYYY hh:mm')}`);
 
-								await this.createObjectNumber(id, `lastUpdate`);
+								await this.createObjectNumber(id, 'lastUpdate');
 								await this.setStateAsync(id, timestamp, true);
 							}
 						}
@@ -853,14 +885,14 @@ class LinuxControl extends utils.Adapter {
 			if (connection) {
 				this.debugHandling(`${logPrefix} send command: '${cmd}'`);
 
-				let response = undefined;
+				let response;
 				if (host.useSudo && cmd.includes('sudo -S ')) {
 					// using sudo
-					let password = await this.getPassword(host);
+					const password = await this.getPassword(host);
 					response = await connection.execCommand(cmd, { execOptions: { pty: true }, stdin: `${password}\n` });
 
 					if (!response.stderr) {
-						response.stdout = response.stdout.replace(password, "")
+						response.stdout = response.stdout.replace(password, '');
 					}
 				} else if (cmd.includes('sudo ') && !cmd.includes('sudo -S ')) {
 					this.errorHandling(new ResponseError(`${logPrefix} you must use 'sudo -S' instead of 'sudo' only!`), logPrefix, responseErrorSendToSentry);
@@ -876,10 +908,10 @@ class LinuxControl extends utils.Adapter {
 					// remove system stdout
 					if (!response.stderr) {
 						response.stdout = response.stdout
-							.replace(/^.*\[sudo\] password for.*$/mg, "")
-							.replace(/^.*\[sudo\] Passwort für.*$/mg, "")
-							.replace(/^.*sudo\: setrlimit\(RLIMIT_CORE\)\: Operation not permitted.*$/mg, "")
-							.replace(/^\s*$(?:\r\n?|\n)/gm, "");	// remove all empty lines
+							.replace(/^.*\[sudo\] password for.*$/mg, '')
+							.replace(/^.*\[sudo\] Passwort für.*$/mg, '')
+							.replace(/^.*sudo: setrlimit\(RLIMIT_CORE\): Operation not permitted.*$/mg, '')
+							.replace(/^\s*$(?:\r\n?|\n)/gm, '');	// remove all empty lines
 
 						// .replace(`[sudo] password for ${host.user}: \r`, "")
 						// .replace('sudo: setrlimit(RLIMIT_CORE): Operation not permitted', "").replace("\n\n", "")
@@ -888,7 +920,7 @@ class LinuxControl extends utils.Adapter {
 					}
 
 					// catch errors that have no .stderr
-					let errorResponse = ['is not in the sudoers file', 'nicht in der sudoers-Datei']
+					const errorResponse = ['is not in the sudoers file', 'nicht in der sudoers-Datei'];
 					if (errorResponse.some(word => response.stdout.includes(word))) {
 						this.errorHandling(new ResponseError(`${logPrefix} ${response.stdout}`), logPrefix, responseErrorSendToSentry);
 						return undefined;
@@ -913,7 +945,7 @@ class LinuxControl extends utils.Adapter {
 			}
 		} catch (err) {
 			this.errorHandling(err, logPrefix);
-			await this.reportResponse(responseId, err.message);
+			await this.reportResponse(responseId, err instanceof Error ? err.message : String(err));
 			return undefined;
 		}
 	}
@@ -938,20 +970,20 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async getConnection(host) {
 		try {
-			let pingResult = await ping.promise.probe(host.ip, { timeout: parseInt(host.timeout) || 5 });
+			const pingResult = await ping.promise.probe(host.ip, { timeout: parseInt(host.timeout, 10) || 5 });
 
 			if (pingResult.alive) {
-				let password = await this.getPassword(host);
+				const password = await this.getPassword(host);
 
-				let ssh = new NodeSSH();
+				const ssh = new NodeSSH();
 
-				let options = {
+				const options = {
 					host: host.ip,
 					port: host.port,
 					username: host.user,
 					password: password,
-					readyTimeout: parseInt(host.timeout) * 1000 || 5000
-				}
+					readyTimeout: parseInt(host.timeout, 10) * 1000 || 5000
+				};
 
 				if (host.rsakey && host.rsakey.length > 0) {
 					this.debugHandling(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}): using rsa key for authentification`);
@@ -961,10 +993,37 @@ class LinuxControl extends utils.Adapter {
 					this.debugHandling(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}): using sudo for authentification`);
 				}
 
+				if (host.legacySsh) {
+					this.debugHandling(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}): enabling legacy SSH algorithms`);
+					// @ts-ignore
+					options.algorithms = {
+						kex: [
+							'diffie-hellman-group1-sha1',
+							'diffie-hellman-group14-sha1',
+							'diffie-hellman-group-exchange-sha1',
+							'diffie-hellman-group-exchange-sha256',
+							'ecdh-sha2-nistp256',
+							'ecdh-sha2-nistp384',
+							'ecdh-sha2-nistp521',
+							'curve25519-sha256',
+							'curve25519-sha256@libssh.org'
+						],
+						cipher: [
+							'aes128-ctr', 'aes192-ctr', 'aes256-ctr',
+							'aes128-gcm', 'aes128-gcm@openssh.com',
+							'aes256-gcm', 'aes256-gcm@openssh.com',
+							'aes128-cbc', 'aes192-cbc', 'aes256-cbc', '3des-cbc'
+						],
+						serverHostKey: [
+							'ssh-rsa', 'ssh-dss', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521', 'ssh-ed25519'
+						]
+					};
+				}
+
 				return await ssh.connect(options);
 			} else {
 				this.log.info(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}) seems not to be online`);
-				this.debugHandling(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}) ping result: ${JSON.stringify(pingResult)}`)
+				this.debugHandling(`[getConnection] Host '${host.name}' (${host.ip}:${host.port}) ping result: ${JSON.stringify(pingResult)}`);
 				return undefined;
 			}
 		} catch (err) {
@@ -975,33 +1034,64 @@ class LinuxControl extends utils.Adapter {
 	}
 
 	async getPassword(host) {
-		let obj = await this.getForeignObjectAsync('system.config');
-		if (obj && obj.native && obj.native.secret) {
+		const obj = await this.getForeignObjectAsync('system.config');
+		if (obj?.native?.secret) {
 			//noinspection JSUnresolvedVariable
 			return this.decryptPassword(obj.native.secret, host.password);
 		} else {
 			//noinspection JSUnresolvedVariable
-			return this.decryptPassword("Zgfr56gFe87jJOM", host.password);
+			return this.decryptPassword('Zgfr56gFe87jJOM', host.password);
 		}
 	}
 
 	async setSelectableHosts() {
-		let hostObj = await this.getObjectAsync(`command.host`);
-		if (hostObj && hostObj.common) {
-			let hostStates = {};
-			// @ts-ignore
-			for (const host of this.config.hosts) {
-				if (host) {
-					// @ts-ignore
+		try {
+			/** @type {Record<string, string>} */
+			const hostStates = {};
+			/** @type {any[]} */
+			const hosts = Array.isArray(this.config.hosts) ? this.config.hosts : [];
+			for (const host of hosts) {
+				if (host?.name) {
 					hostStates[host.name] = host.name;
 				}
 			}
-			hostObj.common.states = hostStates;
 
-			await this.setObjectAsync(`command.host`, hostObj);
-			if (hostStates) {
-				this.subscribeStates(`command.execute`)
+			/** @type {any} */
+			let hostObj = await this.getObjectAsync('command.host');
+			if (!hostObj) {
+				hostObj = {
+					_id: `${this.namespace}.command.host`,
+					type: 'state',
+					common: {
+						name: 'select host',
+						type: 'string',
+						role: 'value',
+						read: true,
+						write: true,
+						states: hostStates
+					},
+					native: {}
+				};
+			} else {
+				if (!hostObj.common) {
+					hostObj.common = {
+						name: 'select host',
+						type: 'string',
+						role: 'value',
+						read: true,
+						write: true
+					};
+				}
+				hostObj.common.states = hostStates;
 			}
+
+			await this.setObjectAsync('command.host', hostObj);
+
+			if (Object.keys(hostStates).length > 0) {
+				this.subscribeStates('command.execute');
+			}
+		} catch (err) {
+			this.errorHandling(err, '[setSelectableHosts]');
 		}
 	}
 
@@ -1011,7 +1101,7 @@ class LinuxControl extends utils.Adapter {
 	 * @param {string} value
 	 */
 	decryptPassword(key, value) {
-		let result = "";
+		let result = '';
 		for (let i = 0; i < value.length; ++i) {
 			result += String.fromCharCode(key[i % key.length].charCodeAt(0) ^ value.charCodeAt(i));
 		}
@@ -1020,31 +1110,32 @@ class LinuxControl extends utils.Adapter {
 
 	async prepareTranslation() {
 		// language for Tranlation
-		var sysConfig = await this.getForeignObjectAsync('system.config');
-		if (sysConfig && sysConfig.common && sysConfig.common['language']) {
-			language = sysConfig.common['language']
+		const sysConfig = await this.getForeignObjectAsync('system.config');
+		if (sysConfig?.common?.language) {
+			language = sysConfig.common.language;
 		}
 
 		// language Function
 		/**
 		 * @param {string | number} string
 		 */
-		_ = function (string) {
+		_ = (string) => {
 			if (words[string]) {
-				return words[string][language]
+				return words[string][language];
 			} else {
 				return string;
 			}
-		}
+		};
 	}
 
 	/**
 	 * @param {string} id
 	 */
 	getHostById(id) {
-		// @ts-ignore
-		return this.config.hosts.find(x =>
-			x.name.replace(/\s/g, "_") === id.replace(/\s/g, "_"));
+		/** @type {any[]} */
+		const hosts = Array.isArray(this.config.hosts) ? this.config.hosts : [];
+		return hosts.find(x =>
+			x.name && x.name.replace(/\s/g, '_') === id.replace(/\s/g, '_'));
 	}
 	//#endregion
 
@@ -1054,11 +1145,19 @@ class LinuxControl extends utils.Adapter {
 	 */
 	onUnload(callback) {
 		try {
-			clearTimeout(requestInterval);
-			clearTimeout(requestIntervalUserCommand);
+			for (const timer of this.hostTimeouts.values()) {
+				this.clearTimeout(timer);
+			}
+			this.hostTimeouts.clear();
+
+			for (const timer of this.userCommandTimeouts.values()) {
+				this.clearTimeout(timer);
+			}
+			this.userCommandTimeouts.clear();
+
 			this.log.info('cleaned everything up...');
 			callback();
-		} catch (e) {
+		} catch (_e) {
 			callback();
 		}
 	}
@@ -1086,20 +1185,20 @@ class LinuxControl extends utils.Adapter {
 	 * @param {ioBroker.State | null | undefined} state
 	 */
 	async onStateChange(id, state) {
-		if (state) {
+		if (state && !state.ack) {
 			this.log.info(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
 
 			if (id.includes('.control.')) {
-				let hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
+				const hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
 
 				/** @type {object} */
-				let host = this.getHostById(hostIdSplitted[0]);
+				const host = this.getHostById(hostIdSplitted[0]);
 
 				if (host) {
-					let responseId = id.replace(hostIdSplitted[hostIdSplitted.length - 1], 'response');
+					const responseId = id.replace(hostIdSplitted[hostIdSplitted.length - 1], 'response');
 
 					if (hostIdSplitted[hostIdSplitted.length - 1] === 'aptUpdate') {
-						let connection = await this.getConnection(host);
+						const connection = await this.getConnection(host);
 
 						if (connection) {
 							await this.reportResponse(responseId, '');
@@ -1108,7 +1207,7 @@ class LinuxControl extends utils.Adapter {
 						}
 
 					} else if (hostIdSplitted[hostIdSplitted.length - 1] === 'aptUpgrade') {
-						let connection = await this.getConnection(host);
+						const connection = await this.getConnection(host);
 
 						if (connection) {
 							await this.reportResponse(responseId, '');
@@ -1117,7 +1216,7 @@ class LinuxControl extends utils.Adapter {
 						}
 
 					} else if (hostIdSplitted[hostIdSplitted.length - 1] === 'shutdown') {
-						let connection = await this.getConnection(host);
+						const connection = await this.getConnection(host);
 
 						if (connection) {
 							await this.reportResponse(responseId, '');
@@ -1126,7 +1225,7 @@ class LinuxControl extends utils.Adapter {
 						}
 
 					} else if (hostIdSplitted[hostIdSplitted.length - 1] === 'restart') {
-						let connection = await this.getConnection(host);
+						const connection = await this.getConnection(host);
 
 						if (connection) {
 							await this.reportResponse(responseId, '');
@@ -1136,16 +1235,16 @@ class LinuxControl extends utils.Adapter {
 					}
 				}
 			} else if (id.includes('.services.')) {
-				let hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
-				let serviceName = hostIdSplitted[hostIdSplitted.length - 2] + ".service";
+				const hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
+				const serviceName = `${hostIdSplitted[hostIdSplitted.length - 2]}.service`;
 
 				/** @type {object} */
-				let host = this.getHostById(hostIdSplitted[0]);
+				const host = this.getHostById(hostIdSplitted[0]);
 
 				if (host) {
 					if (hostIdSplitted[hostIdSplitted.length - 1] === 'restart') {
-						let connection = await this.getConnection(host);
-						let logPrefix = `[sendCommand restart] ${host.name} (${host.ip}:${host.port}):`;
+						const connection = await this.getConnection(host);
+						const logPrefix = `[sendCommand restart] ${host.name} (${host.ip}:${host.port}):`;
 
 						if (connection) {
 							await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}systemctl restart ${serviceName}`, logPrefix);
@@ -1156,8 +1255,8 @@ class LinuxControl extends utils.Adapter {
 							connection.dispose();
 						}
 					} else if (hostIdSplitted[hostIdSplitted.length - 1] === 'start') {
-						let connection = await this.getConnection(host);
-						let logPrefix = `[sendCommand start] ${host.name} (${host.ip}:${host.port}):`;
+						const connection = await this.getConnection(host);
+						const logPrefix = `[sendCommand start] ${host.name} (${host.ip}:${host.port}):`;
 
 						if (connection) {
 							await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}systemctl start ${serviceName}`, logPrefix);
@@ -1168,8 +1267,8 @@ class LinuxControl extends utils.Adapter {
 							connection.dispose();
 						}
 					} else if (hostIdSplitted[hostIdSplitted.length - 1] === 'stop') {
-						let connection = await this.getConnection(host);
-						let logPrefix = `[sendCommand stop] ${host.name} (${host.ip}:${host.port}):`;
+						const connection = await this.getConnection(host);
+						const logPrefix = `[sendCommand stop] ${host.name} (${host.ip}:${host.port}):`;
 
 						if (connection) {
 							await this.sendCommand(connection, host, `${host.useSudo ? 'sudo -S ' : ''}systemctl stop ${serviceName}`, logPrefix);
@@ -1182,25 +1281,25 @@ class LinuxControl extends utils.Adapter {
 					}
 				}
 			} else if (id.includes('.command.execute')) {
-				let cmd = await this.getStateAsync(`${this.namespace}.command.command`);
-				let hostId = await this.getStateAsync(`${this.namespace}.command.host`);
+				const cmd = await this.getStateAsync(`${this.namespace}.command.command`);
+				const hostId = await this.getStateAsync(`${this.namespace}.command.host`);
 
-				let responseId = `${this.namespace}.command.response`;
+				const responseId = `${this.namespace}.command.response`;
 
-				if (hostId && hostId.val) {
+				if (hostId?.val) {
 					/** @type {object} */
-					let host = this.getHostById(hostId.val.toString());
+					const host = this.getHostById(hostId.val.toString());
 
 					if (host) {
-						if (cmd && cmd.val) {
-							let connection = await this.getConnection(host);
+						if (cmd?.val) {
+							const connection = await this.getConnection(host);
 
 							if (connection) {
-								let logPrefix = `[sendCommand] ${host.name} (${host.ip}:${host.port}):`;
+								const logPrefix = `[sendCommand] ${host.name} (${host.ip}:${host.port}):`;
 
 								await this.reportResponse(responseId, '');
 
-								let response = await this.sendCommand(connection, host, cmd.val.toString(), logPrefix, responseId);
+								const response = await this.sendCommand(connection, host, cmd.val.toString(), logPrefix, responseId);
 								if (response) {
 									await this.reportResponse(responseId, response);
 								}
@@ -1210,19 +1309,19 @@ class LinuxControl extends utils.Adapter {
 								connection.dispose();
 							}
 						} else {
-							this.log.warn(`execute command: no command to execute is defined!`);
+							this.log.warn('execute command: no command to execute is defined!');
 							await this.reportResponse(responseId, 'no command to execute is defined!');
 						}
 					}
 				} else {
-					this.log.warn(`execute command: no host is selected!`);
+					this.log.warn('execute command: no host is selected!');
 					await this.reportResponse(responseId, 'no host is selected!');
 				}
-			} else if (id.includes(`.refresh`)) {
-				let hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
+			} else if (id.includes('.refresh')) {
+				const hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
 
 				/** @type {object} */
-				let host = this.getHostById(hostIdSplitted[0]);
+				const host = this.getHostById(hostIdSplitted[0]);
 
 				if (host) {
 					if (id.includes(`${host.name}.refresh`)) {
@@ -1231,33 +1330,29 @@ class LinuxControl extends utils.Adapter {
 				}
 			} else {
 				// user buttons
-				let hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
+				const hostIdSplitted = id.replace(`${this.namespace}.`, '').split('.');
 
 				/** @type {object} */
-				let host = this.getHostById(hostIdSplitted[0]);
+				const host = this.getHostById(hostIdSplitted[0]);
 
 				if (host) {
-					let cmdId = id.replace(`${this.namespace}.${host.name}.`, '');
+					const cmdId = id.replace(`${this.namespace}.${host.name}.`, '');
 
 					// @ts-ignore
-					let commandsList = this.config.commands;
+					/** @type {any[]} */
+					const commandsList = Array.isArray(this.config.commands) ? this.config.commands : [];
 					if (commandsList.length > 0) {
-						let command = commandsList.filter(x => {
-							return x.host === host.name && x.name === cmdId;
-						});
+						const commandObj = commandsList.find(x => x.host === host.name && x.name === cmdId);
 
-						if (command && command.length === 1) {
-							command = command[0];
+						if (commandObj?.command) {
+							const connection = await this.getConnection(host);
+							const logPrefix = `[send userCommand] ${host.name} (${host.ip}:${host.port}) - ${cmdId}:`;
 
-							let connection = await this.getConnection(host);
-							let logPrefix = `[send userCommand] ${host.name} (${host.ip}:${host.port}) - ${cmdId}:`;
-
-							if (connection && command && command.command) {
-								await this.sendCommand(connection, host, command.command, logPrefix);
+							if (connection) {
+								await this.sendCommand(connection, host, commandObj.command, logPrefix);
 
 								connection.dispose();
 							}
-
 						}
 					}
 				}
@@ -1269,6 +1364,7 @@ class LinuxControl extends utils.Adapter {
 
 	/**
 	 * @param {string} id
+	 * @param {string} [logPrefix]
 	 */
 	async delMyObject(id, logPrefix = undefined) {
 		if (this.isAdapterStart) {
@@ -1286,18 +1382,18 @@ class LinuxControl extends utils.Adapter {
 	 * @param {object} host
 	 */
 	async createControls(host) {
-		let logPrefix = `[createControls] ${host.name} (${host.ip}:${host.port}):`;
+		const logPrefix = `[createControls] ${host.name} (${host.ip}:${host.port}):`;
 
 		try {
-			let idPrefix = `${host.name.replace(' ', '_')}.control`;
+			const idPrefix = `${host.name.replace(' ', '_')}.control`;
 			const objects = require('./admin/lib/control.json');
 
 			// @ts-ignore
-			if (this.config.whitelist && this.config.whitelist["control"] && this.config.whitelist["control"].length > 0 && !this.config.blacklistDatapoints[host.name].includes('control.all')) {
+			if (this.config.whitelist?.control?.length > 0 && !this.config.blacklistDatapoints[host.name].includes('control.all')) {
 				for (const obj of objects) {
 
 					// @ts-ignore
-					if (this.config.whitelist["control"].includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`control.${obj.id}`)) {
+					if (this.config.whitelist.control.includes(obj.id) && !this.config.blacklistDatapoints[host.name].includes(`control.${obj.id}`)) {
 
 						if (obj.type === 'button') {
 							await this.createObjectButton(`${idPrefix}.${obj.id}`, obj.name);
@@ -1329,7 +1425,7 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async createObjectString(id, name) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
 				if (obj.common.name !== _(name)) {
@@ -1362,12 +1458,12 @@ class LinuxControl extends utils.Adapter {
 	*/
 	async createObjectNumber(id, name, unit = undefined) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
-				if (obj.common.name !== _(name) || obj.common['unit'] !== _(unit)) {
+				if (obj.common.name !== _(name) || obj.common.unit !== _(unit)) {
 					obj.common.name = _(name);
-					obj.common['unit'] = _(unit);
+					obj.common.unit = _(unit);
 
 					await this.setObjectAsync(id, obj);
 				}
@@ -1397,7 +1493,7 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async createObjectBoolean(id, name) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
 				if (obj.common.name !== _(name)) {
@@ -1429,7 +1525,7 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async createObjectArray(id, name) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
 				if (obj.common.name !== _(name)) {
@@ -1461,7 +1557,7 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async createObjectButton(id, name) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
 				if (obj.common.name !== _(name)) {
@@ -1492,7 +1588,7 @@ class LinuxControl extends utils.Adapter {
 	 */
 	async createMyChannel(id, name) {
 		if (this.isAdapterStart) {
-			let obj = await this.getObjectAsync(id);
+			const obj = await this.getObjectAsync(id);
 
 			if (obj) {
 				if (obj.common.name !== _(name)) {
@@ -1514,9 +1610,9 @@ class LinuxControl extends utils.Adapter {
 	}
 
 	/**
-	 * @param {Error} err
+	 * @param {any} err
 	 * @param {string} logPrefix
-	 * @param {boolean} sendToSentry
+	 * @param {boolean} [sendToSentry]
 	 */
 	errorHandling(err, logPrefix, sendToSentry = true) {
 		if (err.name === 'ResponseError') {
@@ -1529,7 +1625,7 @@ class LinuxControl extends utils.Adapter {
 		}
 
 		if (sendToSentry) {
-			if (this.supportsFeature && this.supportsFeature('PLUGINS')) {
+			if (this.supportsFeature?.('PLUGINS')) {
 				const sentryInstance = this.getPluginInstance('sentry');
 				if (sentryInstance) {
 					if (!err.message.includes('Permission denied') && !err.message.includes('Keine Berechtigung') &&

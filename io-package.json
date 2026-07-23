@@ -3,6 +3,18 @@
     "name": "linux-control",
     "version": "1.1.6",
     "news": {
+      "1.1.6": {
+        "en": "Improved timer cleanup on unload, state ack handling, and added legacy SSH algorithms option",
+        "de": "Verbesserte Timer-Bereinigung beim Beenden, Status-Ack-Handhabung und Option für veraltete SSH-Algorithmen hinzugefügt",
+        "ru": "Улучшена очистка таймеров при выгрузке, обработка подтверждений состояния и добавлена опция устаревших алгоритмов SSH",
+        "pt": "Limpeza de temporizador aprimorada no descarregamento, manipulação de confirmação de estado e adicionada opção de algoritmos SSH legados",
+        "nl": "Verbeterde timer-opschoning bij het ontladen, afhandeling van status-ack en optie voor verouderde SSH-algoritmen toegevoegd",
+        "fr": "Nettoyage amélioré du minuteur lors du déchargement, gestion de l'acquittement d'état et ajout de l'option d'algorithmes SSH hérités",
+        "it": "Migliorata la pulizia del timer allo scaricamento, la gestione dell'ack di stato e aggiunta l'opzione per gli algoritmi SSH legacy",
+        "es": "Limpieza mejorada del temporizador al descargar, manejo de confirmación de estado y se agregó la opción de algoritmos SSH heredados",
+        "pl": "Udoskonalono czyszczenie timera przy zwalnianiu, obsługę potwierdzeń stanu i dodano opcję starszych algorytmów SSH",
+        "zh-cn": "改进了卸载时的定时器清理、状态确认处理，并添加了传统的 SSH 算法选项"
+      },
       "1.1.5": {
         "en": "Dependencies updated",
         "de": "Abhängigkeiten aktualisiert",

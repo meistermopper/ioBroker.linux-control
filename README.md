@@ -34,6 +34,7 @@ Controlling Linux devices and get information about your system
 |user|ssh user for login|
 |password / passpharse|ssh password for login or passpharse if you use a rsa key|
 |use Sudo| using sudo |
+|legacy SSH|enable legacy / deprecated SSH key exchange & cipher algorithms (e.g., `diffie-hellman-group1-sha1`, `3des-cbc`, `ssh-rsa`) for older devices/switches|
 |rsa key|path and filename of your rsa key. Access rights must be available!|
 |timeout|connection timeout|
 
@@ -102,9 +103,20 @@ It is important that the retrieved data is transmitted in the correct type! The 
     ### __WORK IN PROGRESS__
 -->
 
+### **WORK IN PROGRESS**
+* (meistermopper) add optional legacy SSH algorithms support for older devices (closes #90)
+* (meistermopper) add Biome linter, `npm run test:local` workflow and align with harvia-fenix quality standard
+* (meistermopper) fix invalid common.states type for `command.host` object
+* (meistermopper) update dependencies, adminUI configuration and repochecker compliance
+
 ### 1.1.6 (2022-09-06)
 * (Scrounger) global interval for update informations added
 * (Scrounger) fix invalid object host
+
+### 1.1.6 (2026-07-23)
+* (meistermopper) Improved timer resource cleanup on unload using adapter-core safe timeouts
+* (meistermopper) Enforced state ack handling filter in onStateChange
+* (meistermopper) Added legacy SSH key exchange and cipher algorithm support
 
 ### 1.1.5 (2022-05-03)
 * (Scrounger) Dependencies updated
