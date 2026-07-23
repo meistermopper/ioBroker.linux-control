@@ -18,3 +18,8 @@ Thumbs.db
 admin/i18n/flat.txt
 admin/i18n/*/flat.txt
 package-lock.json
+
+# Agent configuration
+.agents/
+.commitmessage
+
