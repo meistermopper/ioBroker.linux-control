@@ -10,6 +10,8 @@
 
 ## Linux Control Adapter for ioBroker
 
+English | [Deutsch](README_de.md)
+
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=VWAXSTS634G88&source=url)
 
 Controlling Linux devices and get information about your system
@@ -95,9 +97,20 @@ It is important that the retrieved data is transmitted in the correct type! The 
 | type             | type of the datapoint                                                                                                                                         |
 | unit             | unit of the datapoint                                                                                                                                         |
 
-## Known Issues
+## Troubleshooting & Known Issues
 
-- if its not possible to get connection to your linux client, check if `iputils-ping` is correct installed on client
+- **Host shows as `seems not to be online` (ICMP Ping failure):**
+  Before connecting via SSH, the adapter performs an ICMP ping probe (`ping.promise.probe`). In **Docker containers** or **unprivileged LXC containers** (e.g. Proxmox), the `iobroker` user may lack permissions to open raw ICMP sockets.
+  - **Fix 1 (Recommended):** Set the SUID permission bit on `ping` on your ioBroker server:
+    ```bash
+    sudo chmod u+s $(which ping)
+    ```
+  - **Fix 2:** Set `cap_net_raw` capabilities:
+    ```bash
+    sudo setcap cap_net_raw+ep $(which ping)
+    ```
+  - **Fix 3 (Docker):** Add `--cap-add=NET_RAW` to your container flags or set `sysctl -w net.ipv4.ping_group_range="0 2147483647"` on the host.
+- Check if `iputils-ping` is installed on the remote Linux target.
 
 ## Changelog
 
@@ -120,6 +133,7 @@ It is important that the retrieved data is transmitted in the correct type! The 
 - (meistermopper) Added legacy SSH key exchange and cipher algorithm support
 - (meistermopper) Prevented browser password autofill in admin hosts configuration table
 - (meistermopper) Fixed broken badges in README and updated links to HTTPS
+- (meistermopper) Added ICMP ping troubleshooting guide and created German README (`README_de.md`)
 
 ### 1.1.5 (2022-05-03)
 
