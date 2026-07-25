@@ -118,6 +118,8 @@ It is important that the retrieved data is transmitted in the correct type! The 
 - (meistermopper) Improved timer resource cleanup on unload using adapter-core safe timeouts
 - (meistermopper) Enforced state ack handling filter in onStateChange
 - (meistermopper) Added legacy SSH key exchange and cipher algorithm support
+- (meistermopper) Prevented browser password autofill in admin hosts configuration table
+- (meistermopper) Fixed broken badges in README and updated links to HTTPS
 
 ### 1.1.5 (2022-05-03)
 
