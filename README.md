@@ -134,6 +134,7 @@ It is important that the retrieved data is transmitted in the correct type! The 
 - (meistermopper) Prevented browser password autofill in admin hosts configuration table
 - (meistermopper) Fixed broken badges in README and updated links to HTTPS
 - (meistermopper) Added ICMP ping troubleshooting guide and created German README (`README_de.md`)
+- (meistermopper) Updated dependencies (`node-ssh`, `ping`, `axios`, `mocha`, `chai`, `eslint`, `gulp`)
 
 ### 1.1.5 (2022-05-03)
 

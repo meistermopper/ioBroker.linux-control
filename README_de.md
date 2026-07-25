@@ -84,6 +84,7 @@ Der Adapter erstellt vordefinierte Datenpunkte mit Informationen und Steuerungsm
 - (meistermopper) Prevented browser password autofill in admin hosts configuration table
 - (meistermopper) Fixed broken badges in README and updated links to HTTPS
 - (meistermopper) Added ICMP ping troubleshooting guide and created deutsche README (`README_de.md`)
+- (meistermopper) Updated dependencies (`node-ssh`, `ping`, `axios`, `mocha`, `chai`, `eslint`, `gulp`)
 
 ---
 
